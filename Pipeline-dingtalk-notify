@@ -1,0 +1,60 @@
+pipeline{
+    agent any
+    
+    tools {
+        maven 'mvn-3.6.3'
+    }
+    triggers {
+        gitlab(triggerOnPush: true,
+            triggerOnMergeRequest: true, 
+            triggerOpenMergeRequestOnPush: "never",
+            triggerOnNoteRequest: true,
+            branchFilterType: "All",
+            secretToken: "1d586984f37c464b0e3661079195823cd2c4bb27")
+    }
+    options {
+      gitLabConnection('gitlab-user-huyouba1')
+    }
+    stages{
+        stage('Checkout'){
+            steps{
+                git branch: 'master', url:'http://gitlab.huyouba1.com/huyouba1/spring-boot-helloworld.git'
+            }
+        }
+        stage('Build'){
+            steps{
+                sh 'mvn clean packages'
+            }
+        }
+    }
+post {
+    success {
+        dingtalk (
+            robot: "dingtalk",
+            type:'ACTION_CARD',
+            atAll: false,
+            title: "构建成功：${env.JOB_NAME}",
+            text: [
+                "应用 ### [${env.JOB_NAME}](${env.JOB_URL}) ### 发布  <font color=#00CD00 >成功</font>！",
+                "- 任务名 ：[${currentBuild.displayName}](${env.BUILD_URL})",
+                "- 耗时：${currentBuild.durationString}".split("and counting")[0]
+            ]
+        )
+    }
+    failure{
+        dingtalk (
+            robot: "dingtalk",
+            type:'ACTION_CARD',
+            atAll: false,
+            title: "构建失败：${env.JOB_NAME}",
+            //messageUrl: 'xxxx',
+            text: [
+                "应用 ### [${env.JOB_NAME}](${env.JOB_URL}) ### 发布  <font color=#EE0000 >失败</font>！",
+                "- 任务名 ：[${currentBuild.displayName}](${env.BUILD_URL})",
+                "- 耗时：${currentBuild.durationString}".split("and counting")[0]
+            ]
+        )
+    }
+}
+
+}
