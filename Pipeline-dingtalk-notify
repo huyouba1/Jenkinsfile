@@ -10,7 +10,7 @@ pipeline{
             triggerOpenMergeRequestOnPush: "never",
             triggerOnNoteRequest: true,
             branchFilterType: "All",
-            secretToken: "1d586984f37c464b0e3661079195823cd2c4bb27")
+            secretToken: "xxxxxxxxxxxxx")
     }
     options {
       gitLabConnection('gitlab-user-huyouba1')
