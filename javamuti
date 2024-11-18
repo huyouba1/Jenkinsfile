@@ -1,0 +1,336 @@
+pipeline {
+  // 指定构建环境为任何可用的节点
+  agent any
+  // 设置构建超时时间为30分钟
+  options {
+        timeout(time: 30, unit: 'MINUTES')
+  }
+
+  // 定义构建阶段
+  stages {
+        // 第一个阶段：拉取代码
+        stage('pull code') {
+            steps {
+                // 输出信息，表示开始拉取代码
+                echo 'Pulling code...'
+                // 使用Git插件从指定的URL拉取代码
+                checkout scmGit(branches: 
+                    [
+                        [name: '*/dev']
+                    ],
+                    extensions: [],
+                    userRemoteConfigs: [
+                        [credentialsId: '132e1f0b-90fc',
+                        url: 'http://10.110.0.113/jx/12s.git']
+                    ]
+                )
+            }
+        }
+
+        // 第二个阶段：设置环境变量
+        stage('setting env') {
+          // 指定构建环境为任何可用的节点
+          agent any
+          // 跳过默认的代码检出步骤
+          options {
+            skipDefaultCheckout(true)
+          }
+          steps {
+            // 使用BuildUser插件来获取构建用户信息
+            wrap([$class: 'BuildUser']) {
+                script {
+                    // 设置BUILD_USER和BUILD_USER_ID变量为构建用户的用户名
+                    BUILD_USER = "${gitlabUserUsername}"
+                    BUILD_USER_ID ="${gitlabUserUsername}"
+                }
+            }
+            // 设置环境变量
+            script {
+                // 设置BUILD_NAME变量为构建的名称
+                env.BUILD_NAME = "智能防御平台：${JOB_BASE_NAME}"
+                // 设置BUILD_USERNAME和BUILD_USERNAMEID变量为构建用户的用户名
+                env.BUILD_USERNAME = "${BUILD_USER}"
+                env.BUILD_USERNAMEID = "${BUILD_USER_ID}"
+                // 设置GITLAB_ACCOUND_NAME和GITLAB_ACCOUND变量为GitLab账户信息
+                env.GITLAB_ACCOUND_NAME = "${gitlabUserName}"
+                env.GITLAB_ACCOUND = "${gitlabUserUsername}"
+                // 设置GITLAB_BRANCH变量为目标分支
+                env.GITLAB_BRANCH = "${gitlabTargetBranch}"
+                // 设置GITLAB_COMMENT_MSG变量为提交信息
+                env.GITLAB_COMMENT_MSG = getCommitMessage()
+                // 设置BUILD_MODULES变量为更改的模块列表
+                env.BUILD_MODULES = changeModules()
+                // 设置BUILD_START_TIME变量为当前日期和时间
+                env.BUILD_START_TIME = currentDate()
+            }
+          }
+        }
+        
+        
+        // 第三个阶段：构建代码
+        stage('build code') {
+            steps {
+                script{
+                    // 获取更改的模块列表
+                    List<String> changes = changeModules()
+                    // 输出更改的模块列表
+                    println("本次构建模块：" + changes)
+                    // 忽略某些模块不需要触发构建
+                    if(changes != null && changes.size() > 0){
+                        List<String> ignores = ignoreModules()
+                        // 从更改的模块列表中移除忽略的模块
+                        for(ignore in ignores){
+                           changes.remove(ignore)
+                        }
+                    }
+                    // 输出忽略后剩余的模块列表
+                    println("忽略后构建模块：" + changes)
+                    // 如果没有更改的模块或包含了通用模块，则使用所有模块
+                    if(changes == null || changes.size() == 0 || containsCommonModule(changes) ){
+                        changes = modules()
+                    }
+                    // 构建前发送机器人消息
+                    sendQy()
+                    
+                    // 使用并行步骤来同时打包多个模块
+                    sh "mvn clean package -Dmaven.test.skip=true -pl ${changes.join(',')} -am"
+                    def parallelBuilds = [:]
+                    changes.each { moduleName ->
+                        parallelBuilds[moduleName] = {
+                            stage("Build ${moduleName}") {
+                                def jarPath = "${moduleName}/target/*.jar"
+                                def remoteDir = "/data/cloud/java"
+                                def removePath = "${moduleName}/target"
+                                def shScript = "sh  /data/cloud/java/bin/restart.sh ${moduleName}"
+                                // Only include SshPublisher for specific modules
+                                if (containsPushModule(moduleName)) {
+                                    sshPublisher(publishers: [
+                                            sshPublisherDesc(
+                                                configName: '10.110.0.110', 
+                                                transfers: [
+                                                    sshTransfer(
+                                                        cleanRemote: false,
+                                                        excludes: '',
+                                                        execCommand: "$shScript",
+                                                        execTimeout: 100000,
+                                                        flatten: false,
+                                                        makeEmptyDirs: false,
+                                                        noDefaultExcludes: false,
+                                                        patternSeparator: '[, ]+',
+                                                        remoteDirectory: "$remoteDir",
+                                                        remoteDirectorySDF: false,
+                                                        removePrefix: "$removePath",
+                                                        sourceFiles: "$jarPath")
+                                                    ],
+                                                usePromotionTimestamp: false,
+                                                useWorkspaceInPromotion: false,
+                                                verbose: false)
+                                        ])    
+                                }
+                            }
+                        }
+                    }
+                    parallel parallelBuilds
+                }
+            }
+        }
+    }
+ 
+
+    // 构建后执行的操作
+    post {
+        // 成功时执行的操作
+        success {
+           script {
+              // 记录构建结束时间
+            env.BUILD_END_TIME = currentDate()
+            // 计算构建用时
+            env.BUILD_USE_TIME = calculateBuildTime(env.BUILD_START_TIME, env.BUILD_END_TIME)
+             sh '''
+                export TYPE=success
+                export GITLAB_COMMENT_MSG="${GITLAB_COMMENT_MSG}"
+                export JOB_NAME="${BUILD_NAME}"
+                export BUILD_MODULES="${BUILD_MODULES}"
+                export GITLAB_ACCOUND_NAME="${GITLAB_ACCOUND_NAME}"
+                export GITLAB_ACCOUND="${GITLAB_ACCOUND}"
+                export BUILD_BRANCH="${GITLAB_BRANCH}"
+                export URL_JOB="${BUILD_URL}"
+                export URL_LOG="${BUILD_URL}console"
+                export JOB_TIPS1="${BUILD_USERNAMEID}"
+                export BUILD_USE_TIME="${BUILD_USE_TIME}"
+                sh /home/jenkins/send_message-export.sh
+            '''
+           }
+        }
+        // 失败时执行的操作
+        failure {
+            script {
+                // 记录构建结束时间
+            env.BUILD_END_TIME = currentDate()
+            // 计算构建用时
+            env.BUILD_USE_TIME = calculateBuildTime(env.BUILD_START_TIME, env.BUILD_END_TIME)
+             sh '''
+                export TYPE=failure
+                export GITLAB_COMMENT_MSG="${GITLAB_COMMENT_MSG}"
+                export JOB_NAME="${BUILD_NAME}"
+                export BUILD_MODULES="${BUILD_MODULES}"
+                export GITLAB_ACCOUND_NAME="${GITLAB_ACCOUND_NAME}"
+                export GITLAB_ACCOUND="${GITLAB_ACCOUND}"
+                export BUILD_BRANCH="${GITLAB_BRANCH}"
+                export URL_JOB="${BUILD_URL}"
+                export URL_LOG="${BUILD_URL}console"
+                export JOB_TIPS1="${BUILD_USERNAMEID}"
+                export BUILD_USE_TIME="${BUILD_USE_TIME}"
+                sh /home/jenkins/send_message-export.sh
+            '''
+            }
+        }
+  }
+}
+
+// 发送微信机器人消息的函数
+void sendQy(){
+    sh '''#!/bin/bash
+curl \'https://qya0b\' \\
+   -H \'Content-Type: application/json\' \\
+   -d \'
+   {
+    "msgtype": "markdown",
+    "markdown": {
+        "content": "<font color=\\"green\\">\'"【${JOB_NAME}】 开始构建"\'</font>\\n
+         >构建的模块:<font color=\\"comment\\">\'"${BUILD_MODULES}"\'</font>\\n
+         >提交人gitlab账号: <font color=\\"comment\\">'"${GITLAB_ACCOUND_NAME}/${GITLAB_ACCOUND}"'</font>\\n
+         >分支: <font color=\\"comment\\">'"${GITLAB_BRANCH}"'</font>\\n
+         >提交信息: <font color=\\"comment\\">'"${GITLAB_COMMENT_MSG}"'</font>\\n
+         >[查看控制台](\'"${BUILD_URL}/console"\')"
+    }
+}\''''
+}
+
+// 获取更改的模块列表的函数
+@NonCPS
+List<String> changeModules(){
+    def uniquePaths = []
+    currentBuild.changeSets.each { changeSetItem ->
+        changeSetItem.items.each { item ->
+            item.affectedPaths.each { path ->
+                def pathStart = path.tokenize('/')[0]
+                uniquePaths.add(pathStart)
+            }
+        }
+    }
+    return uniquePaths.unique()
+}
+
+// 获取通用模块列表的函数
+@NonCPS
+List<String> commonModules(){
+    def commons = ['common','common-log','pom.xml']
+    return commons
+}
+
+// 检查模块是否需要推送的函数
+@NonCPS
+boolean containsPushModule(String module) {
+    List<String> commons = commonModules()
+    return !commons.contains(module)
+}
+
+// 检查模块列表是否包含通用模块的函数
+@NonCPS
+boolean containsCommonModule(List<String> modules) {
+    List<String> commons = commonModules()
+    for (module in modules) {
+        if (commons.contains(module)) {
+            return true
+        }
+    }
+    return false
+}
+
+// 获取忽略的模块列表的函数
+@NonCPS
+List<String> ignoreModules(){
+    def ignores = ['.gitignore','assets']
+    return ignores
+}
+
+// 获取所有模块列表的函数
+@NonCPS
+List<String> modules(){
+    def modules = ['ccccc','work-xxxxxx','zzzz','ixx','siem','zzzz-sss','xxx']
+    return modules
+}
+
+
+// 获取更改的文件列表的函数
+@NonCPS
+List<String> getChangedFilesList(){
+    def changedFiles = []
+    for ( changeLogSet in currentBuild.changeSets){
+        for (entry in changeLogSet.getItems()){
+            changedFiles.addAll(entry.affectedPaths)
+        }
+    }
+    return changedFiles
+}
+
+// 获取Git提交ID的函数
+@NonCPS
+String getGitcommitID(){
+    gitCommitID = " "
+    for ( changeLogSet in currentBuild.changeSets){
+        for (entry in changeLogSet.getItems()){
+            gitCommitID = entry.commitId
+        }
+    }
+    return gitCommitID
+}
+
+// 获取作者姓名的函数
+@NonCPS
+String getAuthorName(){
+    gitAuthorName = " "
+    for ( changeLogSet in currentBuild.changeSets){
+        for (entry in changeLogSet.getItems()){
+            gitAuthorName = entry.authorName
+        }
+    }
+    return gitAuthorName
+}
+
+// 获取提交信息的函数
+@NonCPS
+String getCommitMessage(){
+    commitMessage = " "
+    for ( changeLogSet in currentBuild.changeSets){
+        for (entry in changeLogSet.getItems()){
+            commitMessage = entry.msg
+        }
+    }
+    return commitMessage
+}
+
+// 获取当前日期和时间的函数
+import java.text.SimpleDateFormat
+def currentDate(){
+    return new Date().format('yyyy-MM-dd HH:mm:ss')
+}
+// 计算构建用时的函数
+def calculateBuildTime(buildStartTimeStr, buildEndTimeStr) {
+    // 定义日期格式
+    def dateFormat = new SimpleDateFormat('yyyy-MM-dd HH:mm:ss')
+    
+    // 解析开始和结束时间
+    def buildEndTime = dateFormat.parse(buildEndTimeStr)
+    def buildStartTime = dateFormat.parse(buildStartTimeStr)
+    
+    // 计算构建用时，转换为整数以避免 BigDecimal 问题
+    def duration = ((buildEndTime.time - buildStartTime.time) / 1000).toInteger()
+    
+    def hours = (duration / 3600) as int
+    def minutes = ((duration % 3600) / 60) as int
+    def seconds = (duration % 60) as int
+    
+    return "${hours}小时 ${minutes}分钟 ${seconds}秒"
+}
